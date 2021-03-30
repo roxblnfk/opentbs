@@ -7,8 +7,8 @@
  * This TBS plug-in can open a zip file, read the central directory,
  * and retrieve the content of a zipped file which is not compressed.
  *
- * @version 1.10.0-beta
- * @date 2019-06-18
+ * @version 1.10.2
+ * @date 2020-11-19
  * @see     http://www.tinybutstrong.com/plugins.php
  * @author  Skrol29 http://www.tinybutstrong.com/onlyyou.html
  * @license LGPL-3.0
@@ -97,7 +97,7 @@ class clsOpenTBS extends clsTbsZip {
 		if (!isset($TBS->OtbsClearMsPowerpoint))    $TBS->OtbsClearMsPowerpoint = true;
 		if (!isset($TBS->OtbsGarbageCollector))     $TBS->OtbsGarbageCollector = true;
 		if (!isset($TBS->OtbsMsExcelCompatibility)) $TBS->OtbsMsExcelCompatibility = true;
-		$this->Version = '1.10.0-beta';
+		$this->Version = '1.10.2';
 		$this->DebugLst = false; // deactivate the debug mode
 		$this->ExtInfo = false;
 		$TBS->TbsZip = &$this; // a shortcut
@@ -276,6 +276,8 @@ class clsOpenTBS extends clsTbsZip {
 				$this->TbsPicPrepare($Txt, $Loc, true); // add parameter "att" which will be processed just after this event, when the field is cached
 			} elseif (in_array('mergecell', $ope_lst)) {
 				$this->TbsPrepareMergeCell($Txt, $Loc);
+			} elseif (in_array('docfield', $ope_lst)) {
+				$this->TbsDocFieldPrepare($Txt, $Loc);
 			}
 
 			// Change cell type
@@ -319,6 +321,8 @@ class clsOpenTBS extends clsTbsZip {
 					$Value = '<w:vMerge w:val="restart"/>';
 				}
 			}
+		} elseif ($ope==='docfield') {
+			$this->TbsDocFieldPrepare($Txt, $Loc);
 		} else {
 			$x = substr($ope,0,4);
 			if( ($x==='tbs:') || ($x==='xlsx') || (substr($ope,0,3)==='ods') ) {
@@ -520,14 +524,20 @@ class clsOpenTBS extends clsTbsZip {
 
 		} elseif ($Cmd==OPENTBS_SELECT_SLIDE) {
 
+			$master  = (is_null($x2)) ? false : $x2;
+
 			if ($this->ExtEquiv=='odp') {
-				$this->TbsLoadSubFileAsTemplate($this->ExtInfo['main']);
+				// ODP
+				// All slides are in the same sub-file
+				$file = ($master) ? 'styles.xml' : $this->ExtInfo['main'];
+				$this->TbsLoadSubFileAsTemplate($file);
 				return true;
 			}
 			
 			if ($this->ExtEquiv!='pptx') return false;
 
-			$master  = (is_null($x2)) ? false : $x2;
+			// PPTX
+
 			$slide = ($master) ? 'slide master' : 'slide';
 			$RefLst = $this->MsPowerpoint_InitSlideLst($master);
 
@@ -661,8 +671,12 @@ class clsOpenTBS extends clsTbsZip {
 				$x2 = intval($x2); // 0 by default
 				$file = $this->MsWord_GetHeaderFooterFile($Cmd, $x1, $x2);
 				break;
-			case 'odt': case 'ods': case 'odp':
-				$file = $this->ExtInfo['main'];
+			case 'odt':
+				$file = 'styles.xml';
+				break;
+			case 'ods': case 'odp':
+				$this->ExtInfo['main'];
+				break;
 			case 'xlsx': case 'pptx': 
 				return false;
 				break;
@@ -681,10 +695,14 @@ class clsOpenTBS extends clsTbsZip {
 					$res[] = $info['file'];
 				}				
 				break;
-			case 'odt': case 'ods': case 'odp':
+			case 'odt':
+				$res[] = 'styles.xml';
+				break;
+			case 'ods': case 'odp':
 				// Headers and footers are in the main file.
 				// Handout headers and footers for presentations (PPTX & ODP) are not supported for now.
 				if (isset($this->ExtInfo['main'])) $res[] = $this->ExtInfo['main'];
+				break;
 			case 'xlsx':
 				$FileName = $this->CdFileLst[$this->TbsCurrIdx];
 				if ($this->MsExcel_SheetIsIt($FileName) ) $res[] = $FileName;
@@ -1132,8 +1150,13 @@ If they are blank spaces, line beaks, or other unexpected characters, then you h
 
 	}
 
-	function TbsDebug_Merge($XmlFormat = true, $Current) {
-	// display modified and added files
+	/**
+	 * echo() info about modified and added files.
+	 *
+	 * @param boolean $XmlFormat  format XML contents
+	 * @param boolean $Current    true to start the debug with the current subtemplate, false to start when Show is called.
+	 */
+	function TbsDebug_Merge($XmlFormat, $Current) {
 
 		$this->TbsDebug_Init($nl, $sep, $bull, ($Current ? 'OPENTBS_DEBUG_XML_CURRENT' :'OPENTBS_DEBUG_XML_SHOW'));
 
@@ -1319,9 +1342,19 @@ If they are blank spaces, line beaks, or other unexpected characters, then you h
 		$att = false;
 		if ($this->ExtType==='odf') {
 			$att = 'draw:image#xlink:href';
+            $magnet = 'draw:frame';
 		} elseif ($this->ExtType==='openxml') {
-			$att = $this->OpenXML_FirstPicAtt($Txt, $Loc->PosBeg, $backward);
-			if ($att===false) return $this->RaiseError('Parameter ope=changepic used in the field ['.$Loc->FullName.'] has failed to found the picture.');
+			$type = $this->OpenXML_FirstPicType($Txt, $Loc->PosBeg, $backward);
+            if ($type == 'vml') {
+                // old way
+                $att = 'v:imagedata#r:id';
+                $magnet = 'w:pict';
+            } elseif ($type == 'dml') {
+                $att = 'a:blip#r:embed';
+                $magnet = 'w:drawing';
+            } else {
+                return $this->RaiseError('Parameter ope=changepic used in the field ['.$Loc->FullName.'] has failed to found the picture.');
+            }
 		} else {
 			return $this->RaiseError('Parameter ope=changepic used in the field ['.$Loc->FullName.'] is not supported with the current document type.');
 		}
@@ -1335,6 +1368,8 @@ If they are blank spaces, line beaks, or other unexpected characters, then you h
 		// Delete parameter att to prevent TBS from another processing
 		unset($Loc->PrmLst['att']);
 	   
+        $Loc->PrmLst['magnet'] = $magnet;
+       
 		// Get picture dimension information
 		if (isset($Loc->PrmLst['adjust'])) {
 			$FieldLen = 0;
@@ -1567,7 +1602,12 @@ If they are blank spaces, line beaks, or other unexpected characters, then you h
 	 * Argument $Prm is only used for error messages.
 	 */
 	function TbsPicAdd(&$Value, &$PrmLst, &$Txt, &$Loc, $Prm) {
-		
+        
+        if ($Value == '') {
+            // The magnet parameter will delete the picture container
+            return true;
+        }
+        
 		$TBS = &$this->TBS;
 
 		$PrmLst['pic_prepared'] = true; // mark the locator as Picture prepared
@@ -1636,6 +1676,60 @@ If they are blank spaces, line beaks, or other unexpected characters, then you h
 
 		return true;
 
+	}
+
+	function TbsDocFieldPrepare(&$Txt, &$Loc) {
+		
+		if ($this->ExtEquiv === 'docx') {
+			
+			// Find the first <w:r> element of the Complexe Field
+			$loc_beg = clsTbsXmlLoc::FindStartTagHavingAtt($Txt, 'w:fldCharType="begin"', $Loc->PosBeg, false); // find a <w:fldChar>
+			if ($loc_beg === false) return;
+			$loc_beg = clsTbsXmlLoc::FindStartTag($Txt, 'w:r', $loc_beg->PosBeg, false); // the <w:r> that contains the <w:fldChar>
+			
+			// Find the last <w:r> element of the Complexe Field
+			$loc_end = clsTbsXmlLoc::FindStartTagHavingAtt($Txt, 'w:fldCharType="end"', $Loc->PosEnd, true); // find a <w:fldChar>
+			if ($loc_end === false) return;
+			$loc_end = clsTbsXmlLoc::FindElement($Txt, 'w:r', $loc_end->PosBeg, false); // the <w:r> that contains the <w:fldChar>
+
+			// The penultimate <w:r> element is the latest calculated field. We use it for getting the formating text.
+			$loc_wr = clsTbsXmlLoc::FindElement($Txt, 'w:r', $loc_end->PosBeg - 1, false);
+			if ($loc_wr === false) {
+				$x = '<w:r><w:t>DOCFIELD</w:t></w:r>';
+			} else {
+				// Delete the Complete Field element if any (should not)
+				$x = $loc_wr->GetSrc();
+				$this->XML_DeleteElements($x, array('w:instrText', 'w:fldChar'));
+				// Replace text
+				$lz = clsTbsXmlLoc::FindElement($x, 'w:t', 0);
+				if ($lz === false) {
+					// Not found => we create a new text before the closing tag
+					$x = substr_replace($x, '<w:t>DOCFIELD</w:t>', -6, 0);
+				} else {
+					$lz->ReplaceInnerSrc('DOCFIELD');
+				}
+			}
+			
+			// Replace template
+			$len = $loc_end->PosEnd - $loc_beg->PosBeg + 1;
+			$Txt = substr_replace($Txt, $x, $loc_beg->PosBeg, $len);
+			
+			// Move the locator
+			$p = strpos($x, '>DOCFIELD<') + 1;
+			$Loc->PosBeg = $loc_beg->PosBeg + $p;
+			$Loc->PosEnd = $Loc->PosBeg + strlen('DOCFIELD') - 1;
+			
+		} elseif ($this->ExtEquiv === 'odt') {
+			
+			$loc_el = clsTbsXmlLoc::FindStartTagByPrefix($Txt, '', $Loc->PosBeg, false);
+			if ( ($loc_el !== false) && ($loc_el->Name === 'text:conditional-text') ) {
+				$loc_el->FindEndTag();
+				$Loc->PosBeg = $loc_el->PosBeg;
+				$Loc->PosEnd = $loc_el->PosEnd; 
+			}
+			
+		}
+		
 	}
 
 	// Adjust the dimensions if the picture
@@ -1889,16 +1983,50 @@ If they are blank spaces, line beaks, or other unexpected characters, then you h
 		
 		if (is_array($Value)) $Value = implode(',', $Value);
 
-		// Retreive the list of columns id to delete
-		$col_lst = $this->TbsMergeVarFields($PrmLst['colnum'], $Value); // prm equal to true if value is not given
+		// Column set
+		$shift_ok = false;
+		if (isset($PrmLst['colset'])) {
+			$col_set = str_replace(' ', '', $PrmLst['colset']);
+			$col_set = explode('|', $col_set);
+			$col_lst = array();
+			$val_lst = explode(',', $Value);
+			foreach ($val_lst as $s) {
+				$idx = intval($s) - 1;
+				if (isset($col_set[$idx])) {
+					$col_lst[] = $col_set[$idx];
+				}
+			}
+			$col_lst = implode(',', $col_lst);
+		} elseif (isset($PrmLst['colnum'])) {
+			// Retreive the list of columns id to delete
+			$col_lst = $this->TbsMergeVarFields($PrmLst['colnum'], $Value); // prm equal to true if value is not given
+			$shift_ok = true;
+		} else {
+			$col_lst = $Value;
+			$shift_ok = true;
+		}
+		
+		// Convert the colmun list into an array
 		$col_lst = str_replace(' ', '', $col_lst);
 		if ( ($col_lst=='') || ($col_lst=='0') ) return false; // there is nothing to do
 		$col_lst = explode(',', $col_lst);
 		$col_nbr = count($col_lst);
-		for ($c=0; $c<$col_nbr; $c++) $col_lst[$c] = intval($col_lst[$c]); // Conversion into numerical
+		for ($c = 0; $c < $col_nbr; $c++) {
+			// In cas of range separator
+			$x = explode('-', $col_lst[$c]);
+			$x0 = intval($x[0]);
+			$col_lst[$c] = $x0;
+			// Range separator
+			if (isset($x[1])) {
+				$x1 = intval($x[1]);
+				for ($i = $x0 + 1 ; $i <= $x1 ; $i++) {
+					$col_lst[] = $i; // added after the existing values
+				}
+			}
+		}
 		
 		// Add columns by shifting
-		if (isset($PrmLst['colshift'])) {
+		if ($shift_ok && isset($PrmLst['colshift'])) {
 			$col_shift = intval($this->TbsMergeVarFields($PrmLst['colshift'], $Value));
 			if ($col_shift<>0) {
 				$step = ($col_shift>0) ? -1 : +1;
@@ -2015,30 +2143,27 @@ If they are blank spaces, line beaks, or other unexpected characters, then you h
 
 		$this->ExtEquiv = false;
 		$this->ExtType = false;
-	
+
+        // Find the extension
 		if ($Ext===false) {
-			// Get the extension of the current archive
-			if ($this->ArchIsStream) {
-				$Ext = '';
-			} else {
-				$Ext = basename($this->ArchFile);
-				$p = strrpos($Ext, '.');
-				$Ext = ($p===false) ? '' : strtolower(substr($Ext, $p + 1));
-			}
-			$Frm = $this->Ext_DeductFormat($Ext, true); // may change $Ext
-			// Rename the name of the phantom file if it is a stream
-			if ( $this->ArchIsStream && (strlen($Ext)>2) ) $this->ArchFile = str_replace('.zip', '.'.$Ext, $this->ArchFile);
-		} else {
-			// The extension is forced
-			$Frm = $this->Ext_DeductFormat($Ext, false); // may change $Ext
-		}
+            $Ext = basename($this->ArchFile);
+            $p = strrpos($Ext, '.');
+            $Ext = ($p===false) ? '' : strtolower(substr($Ext, $p + 1));
+            // At this point, $Ext may have special value '' or 'zip' (no extension in the the template file from a local file or stream file).
+        }
+    
+        $Frm = $this->Ext_DeductFormatFromExt($Ext);       
+        if ($Frm===false) {
+            $Frm = $this->Ext_DeductFormatFromContents($Ext); // may force $Ext to a valid extension
+        }
 
 		$TBS = &$this->TBS;
 		$set_option = method_exists($TBS, 'SetOption');
 		
 		$i = false;
 		$block_alias = false;
-		
+        
+	
 		if (isset($GLOBAL['_OPENTBS_AutoExt'][$Ext])) {
 			// User defined information
 			$i = $GLOBAL['_OPENTBS_AutoExt'][$Ext];
@@ -2053,7 +2178,10 @@ If they are blank spaces, line beaks, or other unexpected characters, then you h
 			if ($Ext==='ots') $this->ExtEquiv = 'ods';
 			$this->ExtType = 'odf';
 			$ctype = array('t' => 'text', 's' => 'spreadsheet', 'g' => 'graphics', 'f' => 'formula', 'p' => 'presentation', 'm' => 'text-master');
-			$i['ctype'] .= $ctype[($Ext[2])];
+            $z = substr($Ext, 2, 1);
+            if (isset($ctype[$z])) {
+                $i['ctype'] .= $ctype[$z];
+            }
 			$i['pic_ext'] = array('png' => 'png', 'bmp' => 'bmp', 'gif' => 'gif', 'jpg' => 'jpeg', 'jpeg' => 'jpeg', 'jpe' => 'jpeg', 'jfif' => 'jpeg', 'tif' => 'tiff', 'tiff' => 'tiff');
 			$block_alias = array(
 				'tbs:p' => 'text:p',              // ODT+ODP
@@ -2106,8 +2234,8 @@ If they are blank spaces, line beaks, or other unexpected characters, then you h
 					'tbs:row' => 'w:tr',
 					'tbs:cell' => 'w:tc',
 					'tbs:page' => array(&$this, 'MsWord_GetPage'),
-					'tbs:draw' => 'mc:AlternateContent',
-					'tbs:drawgroup' => 'mc:AlternateContent',
+					'tbs:draw' => array(&$this, 'MsWord_GetDraw'),
+					'tbs:drawgroup' => array(&$this, 'MsWord_GetDraw'),
 					'tbs:drawitem' => 'wps:wsp',
 					'tbs:listitem' => 'w:p',
 				);  
@@ -2172,14 +2300,27 @@ If they are blank spaces, line beaks, or other unexpected characters, then you h
 	}
 
 	// Return the type of document corresponding to the given extension.
-	function Ext_DeductFormat(&$Ext, $Search) {
+	function Ext_DeductFormatFromExt($Ext) {
 		if (strpos(',odt,ods,odg,odf,odp,odm,ott,ots,otg,otp,', ',' . $Ext . ',') !== false) return 'odf';
 		if (strpos(',docx,docm,xlsx,xlsm,pptx,pptm,', ',' . $Ext . ',') !== false) return 'openxml';
-		if (!$Search) return false;
+		return false;
+	}
+
+	// Return the type of document corresponding to the inner contents.
+	function Ext_DeductFormatFromContents(&$Ext) {
 		if ($this->FileExists('content.xml')) {
 			// OpenOffice documents
-			if ($this->FileExists('META-INF/manifest.xml')) {
-				$Ext = '?'; // not needed for processing OpenOffice documents
+            $meta = 'META-INF/manifest.xml';
+			if ($this->FileExists($meta)) {
+                $prefix = 'application/vnd.oasis.opendocument.';
+                $txt = $this->FileRead($meta, true);
+                if (strpos($txt, $prefix.'text') !== false) {
+                    $Ext = 'odt';
+                } elseif (strpos($txt, $prefix.'presentation') !== false) {
+                    $Ext = 'odp';
+                } elseif (strpos($txt, $prefix.'spreadsheet') !== false) {
+                    $Ext = 'ods';
+                }
 				return 'odf';
 			}
 		} elseif ($this->FileExists('[Content_Types].xml')) {
@@ -2197,7 +2338,7 @@ If they are blank spaces, line beaks, or other unexpected characters, then you h
 		}
 		return false;
 	}
-
+    
 	// Return the idx of the main document, if any.
 	function Ext_GetMainIdx() {
 		if ( ($this->ExtInfo!==false) && isset($this->ExtInfo['main']) ) {
@@ -2207,9 +2348,14 @@ If they are blank spaces, line beaks, or other unexpected characters, then you h
 		}
 	}
 
-	function XML_FoundTagStart($Txt, $Tag, $PosBeg) {
-	// Found the next tag of the asked type. (Not specific to MsWord, works for any XML)
-	// Tag must be prefixed with '<' or '</'.
+	/**
+     * Search the next tag of the asked type searching forward. (Not specific to MsWord, works for any XML)
+	 * @param string  $Txt
+	 * @param string  $Tag     must be prefixed with '<' or '</'.
+	 * @param integer $PosBeg 
+	 * @return integer|false
+	 */
+	function XML_SearchTagForward($Txt, $Tag, $PosBeg) {
 		$len = strlen($Tag);
 		$p = $PosBeg;
 		while ($p!==false) {
@@ -3533,7 +3679,7 @@ If they are blank spaces, line beaks, or other unexpected characters, then you h
 
 	}
 
-	function OpenXML_FirstPicAtt($Txt, $Pos, $Backward) {
+	function OpenXML_FirstPicType($Txt, $Pos, $Backward) {
 	// search the first image element in the given direction. Two types of image can be found. Return the value required for "att" parameter.
 		$TypeVml = '<v:imagedata ';
 		$TypeDml = '<a:blip ';
@@ -3574,9 +3720,9 @@ If they are blank spaces, line beaks, or other unexpected characters, then you h
 		}
 
 		if ($t===$TypeVml) {
-			return 'v:imagedata#r:id';
+			return 'vml';
 		} elseif ($t===$TypeDml) {
-			return 'a:blip#r:embed';
+			return 'dml';
 		} else {
 			return false;
 		}
@@ -5291,10 +5437,12 @@ If they are blank spaces, line beaks, or other unexpected characters, then you h
 
 	}
 
+	/**
+	 * Delete XML attributes relative to log of user modifications. Returns the number of deleted attributes.
+	 * In order to insert such information, MsWord does split TBS tags with XML elements.
+	 * After such attributes are deleted, we can concatenate duplicated XML elements.
+	 */
 	function MsWord_CleanRsID(&$Txt) {
-	/* Delete XML attributes relative to log of user modifications. Returns the number of deleted attributes.
-	In order to insert such information, MsWord does split TBS tags with XML elements.
-	After such attributes are deleted, we can concatenate duplicated XML elements. */
 
 		$rs_lst = array('w:rsidR', 'w:rsidRPr');
 
@@ -5356,71 +5504,89 @@ If they are blank spaces, line beaks, or other unexpected characters, then you h
 		$wtc_len = strlen($wtc);
 
 		$preserve = 'xml:space="preserve"';
+		$preserve_len = strlen($preserve);
 
-		$nbr = 0;
+		$nb_tot = 0;
 		$wro_p = 0;
-		while ( ($wro_p=$this->XML_FoundTagStart($Txt,$wro,$wro_p))!==false ) { // next <w:r> tag
-			$wto_p = $this->XML_FoundTagStart($Txt,$wto,$wro_p); // next <w:t> tag
-			if ($wto_p===false) return false; // error in the structure of the <w:r> element
+		while ( ($wro_p = $this->XML_SearchTagForward($Txt, $wro, $wro_p)) !== false ) { // next <w:r> tag
+			$wto_p = $this->XML_SearchTagForward($Txt, $wto, $wro_p); // next <w:t> tag
+			if ($wto_p === false) return false; // error in the structure of the <w:r> element
 			$first = true;
-			$last_att = '';
-			$first_att = '';
+			$nb = 0; // number of duplicated layouts for the current text snippet
 			do {
 				$ok = false;
-				$wtc_p = $this->XML_FoundTagStart($Txt,$wtc,$wto_p); // next </w:t> tag
-				if ($wtc_p===false) return false;
-				$wrc_p = $this->XML_FoundTagStart($Txt,$wrc,$wro_p); // next </w:r> tag (only to check inclusion)
-				if ($wrc_p===false) return false;
-				if ( ($wto_p<$wrc_p) && ($wtc_p<$wrc_p) ) { // if the <w:t> is actually included in the <w:r> element
+				$wtc_p = $this->XML_SearchTagForward($Txt, $wtc, $wto_p); // next </w:t> tag
+				if ($wtc_p === false) return false;
+				$wrc_p = $this->XML_SearchTagForward($Txt, $wrc, $wro_p); // next </w:r> tag (only to check inclusion)
+				if ($wrc_p === false) return false;
+				if ( ($wto_p < $wrc_p) && ($wtc_p < $wrc_p) ) { // if the <w:t> is actually included in the <w:r> element
 					if ($first) {
-						// text that is concatenated and can be simplified
-						$superfluous = '</w:t></w:r>'.substr($Txt, $wro_p, ($wto_p+$wto_len)-$wro_p); // without the last symbol, like: '</w:t></w:r><w:r>....<w:t'
-						$superfluous = str_replace('<w:tab/>', '', $superfluous); // tabs must not be deleted between parts => they nt be in the superfluous string
-						$superfluous_len = strlen($superfluous);
+						// we build the xml that would be the duplicated layout if any
+						$p = strpos($Txt, '<', $wrc_p + $wrc_len);
+						$x = substr($Txt, $wtc_p, $p - $wtc_p); // '</w:t></w:r>   ' may include some linebreaks or spaces after the closing tags
+						$src_to_del = $x . substr($Txt, $wro_p, ($wto_p + $wto_len) - $wro_p); // without the last symbol, like: '</w:t></w:r><w:r>....<w:t'
+						$src_to_del = str_replace('<w:tab/>', '', $src_to_del); // tabs must not be deleted between parts => they nt be in the superfluous string
+						$src_to_del_len = strlen($src_to_del);
 						$first = false;
-						$p_first_att = $wto_p+$wto_len;
-						$p =  strpos($Txt, '>', $wto_p);
-						if ($p!==false) $first_att = substr($Txt, $p_first_att, $p-$p_first_att);
 					}
-					// if the <w:r> layout is the same than the next <w:r>, then we join them
-					$p_att = $wtc_p + $superfluous_len;
-					$x = substr($Txt, $p_att, 1); // must be ' ' or '>' if the string is the superfluous AND the <w:t> tag has or not attributes
-					if ( (($x===' ') || ($x==='>')) && (substr($Txt, $wtc_p, $superfluous_len)===$superfluous) ) {
-						$p_end = strpos($Txt, '>', $wtc_p+$superfluous_len); //
-						if ($p_end===false) return false; // error in the structure of the <w:t> tag
-						$last_att = substr($Txt,$p_att,$p_end-$p_att);
-						$Txt = substr_replace($Txt, '', $wtc_p, $p_end-$wtc_p+1); // delete superfluous part + <w:t> attributes
-						$nbr++;
+					// if the following source is a duplicated layout then we delete it by joining the <w:r> elements.
+					$p_att = $wtc_p + $src_to_del_len;
+					$x = substr($Txt, $p_att, 1); // help to optimize the check because if it's a duplicated layout, the char after is the end of the '<w:t' element.
+					if ( (($x === ' ') || ($x === '>')) && (substr($Txt, $wtc_p, $src_to_del_len)===$src_to_del) ) {
+						$p_end = strpos($Txt, '>', $p_att); //
+						if ($p_end === false) return false; // error in the structure of the <w:t> tag
+						$Txt = substr_replace($Txt, '', $wtc_p, $p_end - $wtc_p + 1); // delete superfluous part + <w:t> attributes
+						$nb_tot++;
+						$nb++;
 						$ok = true;
 					}
 				}
 			} while ($ok);
 
-			// Recover the 'preserve' attribute if the last join element was having it. We check also the first one because the attribute must not be twice.
-			if ( ($last_att!=='') && (strpos($first_att, $preserve)===false)  && (strpos($last_att, $preserve)!==false) ) {
-				$Txt = substr_replace($Txt, ' '.$preserve, $p_first_att, 0);
+			// Add or delete the attribute « xml:space="preserve" » that must be set if there is a space before of after the text
+			if ($nb > 0) {
+				$with_space = false;
+				if ( substr($Txt, $wtc_p - 1, 1) === ' ') $with_space = true;
+				$p_end = strpos($Txt, '>', $wto_p); // first char of the text
+				if ( substr($Txt, $p_end + 1, 1) === ' ') $with_space = true;
+				$src = substr($Txt, $wto_p, $p_end - $wto_p + 1);
+				$p = strpos($src, $preserve);
+				if ( $with_space && ($p === false) ) {
+					// add the attribute
+					$Txt = substr_replace($Txt, ' ' . $preserve, $p_end, 0);
+				} elseif ( (!$with_space) && ($p !== false) ) {
+					// delete the attribute
+					$Txt = substr_replace($Txt, '', $wto_p + $p -1, $preserve_len + 1); // delete the attribut with the space before it
+				}
 			}
 
 			$wro_p = $wro_p + $wro_len;
 
 		}
 
-		return $nbr; // number of replacements
+		return $nb_tot; // number of total replacements
 
 	}
 
 	/**
 	 * Prevent from the problem of missing spaces when calling ->MsWord_CleanRsID() or under certain merging circumstances.
 	 * Replace attribute xml:space="preserve" used in <w:t>, with the same attribute in <w:document>.
-	 * This trick works for MsWord 2007, 2010 but is undocumented. It may be desabled by default in a next version.
-	 * LibreOffice does ignore this attribute in both <w:t> and <w:document>.
+	 * This trick use an attribute of <w:document> element that works for all MsWord versions (last tested is 2019) but is undocumented.
+	 * So it may may be disabled by default in a next version.
+	 * LibreOffice does ignore this attribute in <w:document>.
 	 */
 	function MsWord_CleanSpacePreserve(&$Txt) {
+		
 		$XmlLoc = clsTbsXmlLoc::FindStartTag($Txt, 'w:document', 0);
+
+		// Checks
 		if ($XmlLoc===false) return;
 		if ($XmlLoc->GetAttLazy('xml:space') === 'preserve') return;
 		
-		$Txt = str_replace(' xml:space="preserve"', '', $Txt); // not mendatory but cleanner and save space
+		// We delete the attribute on <w:t> elements. This is not not mendatory but cleanner and save space.
+		// Canceled because needed for LibreOffice
+		// $Txt = str_replace(' xml:space="preserve"', '', $Txt);
+		
 		$XmlLoc->ReplaceAtt('xml:space', 'preserve', true);
 
 	}
@@ -5518,6 +5684,30 @@ If they are blank spaces, line beaks, or other unexpected characters, then you h
 
 		$p = $loc->PosBeg;
 		if ($Forward) $p--; // if it's forward, we stop the block before the paragraph with page-break
+		return $p;
+		
+	}
+
+	// Alias of block: 'tbs:draw'
+	function MsWord_GetDraw($Tag, $Txt, $Pos, $Forward, $LevelStop) {
+		
+		$tags = array('mc:AlternateContent', 'w:r');
+		
+		$p = $Pos;
+		
+		if ($Forward) {
+			foreach ($tags as $tag) {
+				$p = strpos($Txt, '</' . $tag . '>', $p);
+				if ($p === false) return false;
+			}
+		} else {
+			foreach ($tags as $tag) {
+				$loc = clsTbsXmlLoc::FindStartTag($Txt, $tag, $p, false);
+				if ($loc === false) return false;
+				$p = $loc->PosBeg;
+			}
+		}
+		
 		return $p;
 		
 	}
@@ -7056,23 +7246,170 @@ If they are blank spaces, line beaks, or other unexpected characters, then you h
  */
 class clsTbsXmlLoc {
 
-	var $PosBeg;
-	var $PosEnd; // can the end of the open tag, or end of the close tag.
-	var $SelfClosing; // null|false|true, null means unknown.
-	var $Txt;
-	var $Name = ''; 
-	var $Exists; 
+	public $PosBeg;
+	public $PosEnd; // can the end of the open tag, or end of the close tag.
+	public $SelfClosing; // null|false|true, null means unknown.
+	public $Txt;
+	public $Name = ''; 
+	public $Exists; 
 
-	var $pST_PosEnd = false; // position of the end of the start tag
-	var $pST_Src = false;    // cached source of the start tag, false if not cached
-	var $pET_PosBeg = false; // position of the begining of the end tag
+	public $pST_PosEnd = false; // position of the end of the start tag
+	public $pST_Src = false;    // cached source of the start tag, false if not cached
+	public $pET_PosBeg = false; // position of the begining of the end tag
 
-	var $Parent = false; // parent object
+	public $Parent = false; // parent object
 
 	// For relative mode
-	var $rel_Txt = false;
-	var $rel_PosBeg = false;
-	var $rel_Len = false;
+	public $rel_Txt = false;
+	public $rel_PosBeg = false;
+	public $rel_Len = false;
+
+	/**
+	 * Search a start tag of an element in the TXT contents, and return an object if it is found.
+	 * Instead of a TXT content, it can be an object of the class. Thus, the object is linked to a copy
+	 *  of the source of the parent element. The parent element can receive the changes of the object using method UpdateParent().
+	 */
+	static function FindStartTag(&$TxtOrObj, $Tag, $PosBeg, $Forward=true) {
+
+		if (is_object($TxtOrObj)) {
+			$TxtOrObj->FindEndTag();
+			$Txt = $TxtOrObj->GetSrc();
+			if ($Txt===false) return false;
+			$Parent = &$TxtOrObj;
+		} else {
+			$Txt = &$TxtOrObj;
+			$Parent = false;
+		}
+
+		$PosBeg = clsTinyButStrong::f_Xml_FindTagStart($Txt, $Tag, true , $PosBeg, $Forward, true);
+		if ($PosBeg===false) return false;
+
+		return new clsTbsXmlLoc($Txt, $Tag, $PosBeg, null, $Parent);
+
+	}
+
+	/**
+	 * Search a start tag by the prefix of the element.
+	 * @param  string       $TagPrefix The prefix of the tag. Empty string accepeted.
+	 * @return false|object The found object will have its real tag name.
+	 */
+	static function FindStartTagByPrefix(&$Txt, $TagPrefix, $PosBeg, $Forward=true) {
+
+		$x = '<'.$TagPrefix;
+		$xl = strlen($x);
+
+		if ($Forward) {
+			$PosBeg = strpos($Txt, $x, $PosBeg);
+		} else {
+			$PosBeg = strrpos(substr($Txt, 0, $PosBeg+2), $x);
+		}
+		if ($PosBeg===false) return false;
+
+		// Read the actual tag name
+		$Tag = $TagPrefix;
+		$p = $PosBeg + $xl;
+		do {
+			$z = substr($Txt,$p,1);
+			if ( ($z!==' ') && ($z!=="\r") && ($z!=="\n") && ($z!=='>') && ($z!=='/') ) {
+				$Tag .= $z;
+				$p++;
+			} else {
+				$p = false;
+			}
+		} while ($p!==false);
+
+		return new clsTbsXmlLoc($Txt, $Tag, $PosBeg);
+
+	}
+
+	// Search an element in the TXT contents, and return an object if it's found.
+	static function FindElement(&$TxtOrObj, $Tag, $PosBeg, $Forward=true) {
+
+		$XmlLoc = clsTbsXmlLoc::FindStartTag($TxtOrObj, $Tag, $PosBeg, $Forward);
+		if ($XmlLoc===false) return false;
+
+		$XmlLoc->FindEndTag();
+		return $XmlLoc;
+
+	}
+
+	/**
+	 * Search a start tag in the TXT contents which has the asked attribute.
+	 * Note that the element found has an unknown name until FindEndTag() is called.
+	 * The function does check if the attribute is inside an XML element.
+	 * @param  string  &$Txt    The source to search into.
+	 * @param  string  $Att     The attribute name of full definition to search. Example: 'visible' or 'visible="1"'
+	 * @param  integer $PosBeg  The offset position of the search.
+	 * @param  boolean $Forward (optional) Indicate the direction of the search.
+	 * @return false|object
+	 */
+	static function FindStartTagHavingAtt(&$Txt, $Att, $PosBeg, $Forward=true) {
+
+		$p = $PosBeg - (($Forward) ? 1 : -1);
+		$x = (strpos($Att, '=')===false) ? (' '.$Att.'="') : (' '.$Att); // get the item more precise if not yet done
+		$search = true;
+
+		do {
+			if ($Forward) {
+				$p = strpos($Txt, $x, $p+1);
+			} else {
+				$p = strrpos(substr($Txt, 0, $p+1), $x);
+			}
+			if ($p===false) return false;
+			// Seearch for the bound of an element.
+			do {
+			  $p = $p - 1;
+			  if ($p<0) return false;
+			  $z = $Txt[$p];
+			} while ( ($z!=='<') && ($z!=='>') );
+			// If the bound is an opening tag, then the attribute is inside, otherwise we search the next item.
+			if ($z==='<') $search = false;
+		} while ($search);
+
+		return new clsTbsXmlLoc($Txt, '', $p);
+
+	}
+
+	/**
+	 * Search an element in the TXT contents which has the asked attribute, and return an object if it is found.
+	 * @param  string  &$Txt    The source to search into.
+	 * @param  string  $Att     The attribute name of full definition to search. Example: 'visible' or 'visible="1"'
+	 * @param  integer $PosBeg  The offset position of the search.
+	 * @param  boolean $Forward (optional) Indicate the direction of the search.
+	 * @return false|object
+	 */
+	static function FindElementHavingAtt(&$Txt, $Att, $PosBeg, $Forward=true) {
+
+		$XmlLoc = clsTbsXmlLoc::FindStartTagHavingAtt($Txt, $Att, $PosBeg, $Forward);
+		if ($XmlLoc===false) return false;
+
+		$XmlLoc->FindEndTag();
+
+		return $XmlLoc;
+
+	}
+	
+	static function CreatePhantomElement(&$TxtOrObj, $PosBeg) {
+		
+		if (is_object($TxtOrObj)) {
+			$TxtOrObj->FindEndTag();
+			$Txt = $TxtOrObj->GetSrc();
+			if ($Txt===false) return false;
+			$Parent = &$TxtOrObj;
+		} else {
+			$Txt = &$TxtOrObj;
+			$Parent = false;
+		}
+		
+		$Name = '';
+		$SelfClosing = null;
+		$Exists = false;
+
+		$XmlLoc = new clsTbsXmlLoc($Txt, $Name, $PosBeg, $SelfClosing, $Parent, $Exists);
+			
+		return $XmlLoc;
+		
+	}
 	
 	// Create an instance with the given parameters
 	function __construct(&$Txt, $Name, $PosBeg, $SelfClosing = null, $Parent = false, $Exists = true) {
@@ -7359,132 +7696,6 @@ class clsTbsXmlLoc {
 		$this->rel_PosBeg = false;
 		$this->rel_Len = false;
 	}
-	
-	/**
-	 * Search a start tag of an element in the TXT contents, and return an object if it is found.
-	 * Instead of a TXT content, it can be an object of the class. Thus, the object is linked to a copy
-	 *  of the source of the parent element. The parent element can receive the changes of the object using method UpdateParent().
-	 */
-	static function FindStartTag(&$TxtOrObj, $Tag, $PosBeg, $Forward=true) {
-
-		if (is_object($TxtOrObj)) {
-			$TxtOrObj->FindEndTag();
-			$Txt = $TxtOrObj->GetSrc();
-			if ($Txt===false) return false;
-			$Parent = &$TxtOrObj;
-		} else {
-			$Txt = &$TxtOrObj;
-			$Parent = false;
-		}
-
-		$PosBeg = clsTinyButStrong::f_Xml_FindTagStart($Txt, $Tag, true , $PosBeg, $Forward, true);
-		if ($PosBeg===false) return false;
-
-		return new clsTbsXmlLoc($Txt, $Tag, $PosBeg, null, $Parent);
-
-	}
-
-	// Search a start tag by the prefix of the element
-	static function FindStartTagByPrefix(&$Txt, $TagPrefix, $PosBeg, $Forward=true) {
-
-		$x = '<'.$TagPrefix;
-		$xl = strlen($x);
-
-		if ($Forward) {
-			$PosBeg = strpos($Txt, $x, $PosBeg);
-		} else {
-			$PosBeg = strrpos(substr($Txt, 0, $PosBeg+2), $x);
-		}
-		if ($PosBeg===false) return false;
-
-		// Read the actual tag name
-		$Tag = $TagPrefix;
-		$p = $PosBeg + $xl;
-		do {
-			$z = substr($Txt,$p,1);
-			if ( ($z!==' ') && ($z!=="\r") && ($z!=="\n") && ($z!=='>') && ($z!=='/') ) {
-				$Tag .= $z;
-				$p++;
-			} else {
-				$p = false;
-			}
-		} while ($p!==false);
-
-		return new clsTbsXmlLoc($Txt, $Tag, $PosBeg);
-
-	}
-
-	// Search an element in the TXT contents, and return an object if it's found.
-	static function FindElement(&$TxtOrObj, $Tag, $PosBeg, $Forward=true) {
-
-		$XmlLoc = clsTbsXmlLoc::FindStartTag($TxtOrObj, $Tag, $PosBeg, $Forward);
-		if ($XmlLoc===false) return false;
-
-		$XmlLoc->FindEndTag();
-		return $XmlLoc;
-
-	}
-
-	// Search an element in the TXT contents which has the asked attribute, and return an object if it is found.
-	// Note that the element found has an unknown name until FindEndTag() is called.
-	// The given attribute can be with or without a specific value. Example: 'visible' or 'visible="1"'
-	static function FindStartTagHavingAtt(&$Txt, $Att, $PosBeg, $Forward=true) {
-
-		$p = $PosBeg - (($Forward) ? 1 : -1);
-		$x = (strpos($Att, '=')===false) ? (' '.$Att.'="') : (' '.$Att); // get the item more precise if not yet done
-		$search = true;
-
-		do {
-			if ($Forward) {
-				$p = strpos($Txt, $x, $p+1);
-			} else {
-				$p = strrpos(substr($Txt, 0, $p+1), $x);
-			}
-			if ($p===false) return false;
-			do {
-			  $p = $p - 1;
-			  if ($p<0) return false;
-			  $z = $Txt[$p];
-			} while ( ($z!=='<') && ($z!=='>') );
-			if ($z==='<') $search = false;
-		} while ($search);
-
-		return new clsTbsXmlLoc($Txt, '', $p);
-
-	}
-
-	static function FindElementHavingAtt(&$Txt, $Att, $PosBeg, $Forward=true) {
-
-		$XmlLoc = clsTbsXmlLoc::FindStartTagHavingAtt($Txt, $Att, $PosBeg, $Forward);
-		if ($XmlLoc===false) return false;
-
-		$XmlLoc->FindEndTag();
-
-		return $XmlLoc;
-
-	}
-	
-	static function CreatePhantomElement(&$TxtOrObj, $PosBeg) {
-		
-		if (is_object($TxtOrObj)) {
-			$TxtOrObj->FindEndTag();
-			$Txt = $TxtOrObj->GetSrc();
-			if ($Txt===false) return false;
-			$Parent = &$TxtOrObj;
-		} else {
-			$Txt = &$TxtOrObj;
-			$Parent = false;
-		}
-		
-		$Name = '';
-		$SelfClosing = null;
-		$Exists = false;
-
-		$XmlLoc = new clsTbsXmlLoc($Txt, $Name, $PosBeg, $SelfClosing, $Parent, $Exists);
-			
-		return $XmlLoc;
-		
-	}
 
 }
 
@@ -7533,7 +7744,12 @@ class clsTbsZip {
 		$this->ArchIsNew = false;
 		$this->ArchIsStream = (is_resource($ArchFile) && (get_resource_type($ArchFile)=='stream'));
 		if ($this->ArchIsStream) {
-			$this->ArchFile = 'from_stream.zip';
+            $info = stream_get_meta_data($ArchFile);
+            if (isset($info['uri'])) {
+                $this->ArchFile = $info['uri'];
+            } else {
+                $this->ArchFile = 'from_stream.zip';
+            }
 			$this->ArchHnd = $ArchFile;
 		} else {
 			// open the file
